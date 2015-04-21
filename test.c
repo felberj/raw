@@ -3,5 +3,5 @@
 int main()
 {
 	printf("hello World");
-	return 0;
+	return 8;
 }

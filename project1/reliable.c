@@ -129,9 +129,22 @@ void rel_destroy (rel_t *r)
  */
 void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 {
+	if(n < ACK_LEN || n > PKG_MAX_LEN)
+	{
+		fprintf(stderr, 
+				"Received too big/small packet %zu\n", n);
+		return;
+	}
+	uint16_t length = ntohs(pkt->len);
+	if(length != n)
+	{
+		fprintf(stderr,
+				"Received package with invalid length. Expected %d got %d\n",
+				pkt->len, n);	
+		return;
+	}
 	uint16_t checksum = pkt->cksum;
 	pkt->cksum = 0;
-	uint16_t length = ntohs(pkt->len);
 	if(!cksum(pkt, length) == checksum)
 	{
 		fprintf(stderr,
@@ -141,13 +154,6 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 	pkt->len = length;
 	pkt->ackno = ntohl(pkt->ackno);
 	pkt->seqno = ntohl(pkt->seqno);
-	if(pkt->len != n)
-	{
-		fprintf(stderr,
-				"Received package with invalid length. Expected %d got %d\n",
-				pkt->len, n);	
-		return;
-	}
 	/* 
 	 * update larno 
 	 */
@@ -165,6 +171,8 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 			}
 		}
 		r->larno = pkt->ackno;
+		print_pkt(pkt, "", pkt->len);
+		assert(r->larno <= r->seqno);
 		if(r->larno >= r->seqno)
 		{
 			r->terminate_state |= ALL_PKT_ACK;
@@ -172,7 +180,7 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 		if(r->s_wait)
 		{
 			r->s_wait = 0;
-			rel_read(r); // TODO pretty, check if needed or called automaticly
+			rel_read(r); // TODO pretty, but it's needed :-( 
 		}
 	}
 	if(pkt->len == ACK_LEN)
@@ -191,6 +199,7 @@ void send_ackpkt(rel_t *r, uint32_t ackno)
 		packet_t *p = (packet_t *)xmalloc(sizeof(packet_t));
 		p->len = htons(ACK_LEN);
 		p->ackno = htonl(ackno);
+		p->cksum = 0;
 		p->cksum = cksum(p, ACK_LEN);
 		int res = conn_sendpkt(r->c, p, ACK_LEN); 
 		assert(res == ACK_LEN);
@@ -224,6 +233,8 @@ void handle_data_packet(rel_t *r, packet_t *pkt)
 
 void send_packet(rel_t *r, packet_t *pkt)
 {
+	fprintf(stderr, "lno: %d, seqno: %d, pkt, %d\n",r->larno, r->seqno,pkt->seqno);
+	assert(r->larno <= r->seqno);
 	// checking
 	assert(pkt != NULL);
 	
@@ -231,7 +242,8 @@ void send_packet(rel_t *r, packet_t *pkt)
 	assert(pkt->len >= PKG_MIN_LEN);
 	assert(pkt->len <= PKG_MAX_LEN);
 	uint16_t length = pkt->len;
-	
+
+	// set seqno	
 	if(pkt->seqno == 0)
 	{
 		assert(r->seqno < r->larno + r->window_size);
@@ -240,8 +252,11 @@ void send_packet(rel_t *r, packet_t *pkt)
 	}
 	else
 	{
+		assert(pkt->seqno <= r->seqno);
 		assert(pkt->seqno < r->larno + r->window_size);
 	}
+	// set ackno
+	pkt->ackno = r->ackno;
 	assert(r->larno <= pkt->seqno);
 	// update timestamp
 	r->time_stamps[pkt->seqno % r->window_size] = global_timer; 
@@ -330,10 +345,11 @@ void rel_output (rel_t *r)
 		{
 			return;
 		}
+		assert(pkt->seqno == r->ackno);
 		if(pkt->len == 0)
 		{ // handle EOF
-			//conn_output(r->c, pkt->data, 0); // wtf?
-			fprintf(stderr, "Received EOF\n");
+			//int res =  conn_output(r->c, pkt->data, 0); // wtf?
+			fprintf(stderr, "Received EOF, wrote\n");
 			r->recv_window[r->ackno % r->window_size] = NULL; // TODO pretty
 			r->ackno++;
 			send_ackpkt(r, r->ackno);

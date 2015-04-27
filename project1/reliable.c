@@ -59,6 +59,9 @@ void handle_data_packet(rel_t *r, packet_t *pkt);
 void send_ackpkt(rel_t *r, uint32_t ackno);
 void print_state(rel_t *r);
 
+
+// INIT
+
 /* Creates a new reliable protocol session, returns NULL on failure.
  * ss is always NULL */
 rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
@@ -121,6 +124,9 @@ void rel_destroy (rel_t *r)
 	free(r->out_window);
 }
 
+
+// INCOMMING
+
 /**
  * Handler for received packages:
  * if its a valid package and there is space in the out_window,
@@ -151,12 +157,12 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 				"Received package with invalid checksum.\n");	
 		return;
 	}
+	// pkt oke, convert it from network to host
 	pkt->len = length;
 	pkt->ackno = ntohl(pkt->ackno);
 	pkt->seqno = ntohl(pkt->seqno);
-	/* 
-	 * update larno 
-	 */
+	
+	// update larno
 	if(pkt->ackno > r->larno)
 	{
 		for(int i = r->larno; i < pkt->ackno; i++)
@@ -171,7 +177,6 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 			}
 		}
 		r->larno = pkt->ackno;
-		print_pkt(pkt, "", pkt->len);
 		assert(r->larno <= r->seqno);
 		if(r->larno >= r->seqno)
 		{
@@ -194,23 +199,11 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 	handle_data_packet(r, pkt);
 }
 
-void send_ackpkt(rel_t *r, uint32_t ackno)
-{
-		packet_t *p = (packet_t *)xmalloc(sizeof(packet_t));
-		p->len = htons(ACK_LEN);
-		p->ackno = htonl(ackno);
-		p->cksum = 0;
-		p->cksum = cksum(p, ACK_LEN);
-		int res = conn_sendpkt(r->c, p, ACK_LEN); 
-		assert(res == ACK_LEN);
-	//	free(p); // TODO
-}
-
 void handle_data_packet(rel_t *r, packet_t *pkt)
 {
 	if(pkt->seqno < r->ackno)
 	{
-		send_ackpkt(r, r->ackno);
+		send_ackpkt(r, r->ackno); // we already handled the packet, so we just acknowledge it
 		return;
 	}
 	if(pkt->seqno < r->ackno + r->window_size)
@@ -231,9 +224,70 @@ void handle_data_packet(rel_t *r, packet_t *pkt)
 	}
 }
 
+/*
+ *
+ */
+void rel_output (rel_t *r)
+{
+	int can_write = 1;
+	while(can_write)
+	{
+		packet_t *pkt = r->recv_window[r->ackno % r->window_size];
+		if(pkt == NULL)
+		{
+			return;
+		}
+		assert(pkt->seqno == r->ackno);
+		assert((r->terminate_state & O_READ_EOF) == 0);
+		if(pkt->len == 0)
+		{ // handle EOF
+			fprintf(stderr, "Received EOF\n");
+			r->recv_window[r->ackno % r->window_size] = NULL; // TODO pretty
+			r->ackno++;
+			send_ackpkt(r, r->ackno);
+			//int res =  conn_output(r->c, pkt->data, 0); // wtf? If I enable it, it fails
+			r->terminate_state |= O_READ_EOF;
+			r->terminate_state |= WROTE_ALL;
+			return;
+		}
+		assert(pkt->len > r->recv_wrt_bytes);
+		int wrote = conn_output(r->c, pkt->data + r->recv_wrt_bytes,
+				pkt->len - r->recv_wrt_bytes);
+		if(wrote  + r->recv_wrt_bytes == pkt->len)
+		{ // we wrote all data
+			r->recv_wrt_bytes = 0;
+			r->recv_window[r->ackno % r->window_size] = NULL; // TODO free
+			r->ackno++;
+			send_ackpkt(r, r->ackno);
+			r->terminate_state |= WROTE_ALL;
+		}
+		else
+		{ // buffer was full, we cannot write more data
+			assert(pkt->len > wrote + r->recv_wrt_bytes);
+			r->recv_wrt_bytes += wrote;
+			can_write = 0;
+			r->terminate_state &= ~WROTE_ALL;
+		}
+	}
+}
+
+// OUTGOING
+
+void send_ackpkt(rel_t *r, uint32_t ackno)
+{
+		packet_t *p = (packet_t *)xmalloc(sizeof(packet_t));
+		p->len = htons(ACK_LEN);
+		p->ackno = htonl(ackno);
+		p->cksum = 0;
+		p->cksum = cksum(p, ACK_LEN);
+		int res = conn_sendpkt(r->c, p, ACK_LEN); 
+		assert(res == ACK_LEN);
+	//	free(p); // TODO
+}
+
 void send_packet(rel_t *r, packet_t *pkt)
 {
-	fprintf(stderr, "lno: %d, seqno: %d, pkt, %d\n",r->larno, r->seqno,pkt->seqno);
+	fprintf(stderr, "lno: %d, seqno: %d, pkt %d\n",r->larno, r->seqno,pkt->seqno);
 	assert(r->larno <= r->seqno);
 	// checking
 	assert(pkt != NULL);
@@ -332,51 +386,6 @@ void rel_read (rel_t *s)
 	}
 }
 
-/*
- *
- */
-void rel_output (rel_t *r)
-{
-	int can_write = 1;
-	while(can_write)
-	{
-		packet_t *pkt = r->recv_window[r->ackno % r->window_size];
-		if(pkt == NULL)
-		{
-			return;
-		}
-		assert(pkt->seqno == r->ackno);
-		if(pkt->len == 0)
-		{ // handle EOF
-			//int res =  conn_output(r->c, pkt->data, 0); // wtf?
-			fprintf(stderr, "Received EOF, wrote\n");
-			r->recv_window[r->ackno % r->window_size] = NULL; // TODO pretty
-			r->ackno++;
-			send_ackpkt(r, r->ackno);
-			r->terminate_state |= O_READ_EOF;
-			r->terminate_state |= WROTE_ALL;
-			return;
-		}
-		assert(pkt->len > r->recv_wrt_bytes);
-		int wrote = conn_output(r->c, pkt->data + r->recv_wrt_bytes,
-				pkt->len - r->recv_wrt_bytes);
-		if(wrote  + r->recv_wrt_bytes == pkt->len)
-		{
-			r->recv_wrt_bytes = 0;
-			r->recv_window[r->ackno % r->window_size] = NULL;
-			r->ackno++;
-			send_ackpkt(r, r->ackno);
-			r->terminate_state |= WROTE_ALL;
-		}
-		else
-		{
-			assert(pkt->len > wrote + r->recv_wrt_bytes);
-			r->recv_wrt_bytes += wrote;
-			can_write = 0;
-			r->terminate_state &= ~WROTE_ALL;
-		}
-	}
-}
 
 void handle_retransmission(rel_t *r)
 {
@@ -388,12 +397,15 @@ void handle_retransmission(rel_t *r)
 		send_packet(r, r->out_window[r->last_retransmitted_pkt % r->window_size]);
 		assert(r->time_stamps[r->last_retransmitted_pkt % r->window_size] == global_timer);
 		r->last_retransmitted_pkt++;
-		if(r->last_retransmitted_pkt >= r->seqno)
+		if(r->last_retransmitted_pkt > r->seqno)
 		{
 			r->last_retransmitted_pkt = r->larno;
 		}
 	}
 }
+
+
+// UTIL
 
 void check_terminate(rel_t *r)
 {
@@ -401,7 +413,7 @@ void check_terminate(rel_t *r)
 	if(r->terminate_state == 0xF)
 	{
 		fprintf(stderr, "Would destroy now\n");
-		conn_output(r->c, NULL, 0);
+		conn_output(r->c, NULL, 0); // needed
 	}
 }
 

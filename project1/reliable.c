@@ -67,6 +67,7 @@ void print_state(rel_t *r);
 rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
 		const struct config_common *cc)
 {
+	fprintf(stderr, "[DEBUG]\nCreate new\n");
 	rel_t *r;
 
 	r = xmalloc (sizeof (*r));
@@ -162,9 +163,15 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 	pkt->ackno = ntohl(pkt->ackno);
 	pkt->seqno = ntohl(pkt->seqno);
 	
+	if(pkt->ackno > r->seqno)
+	{
+		fprintf(stderr, "ERROR, received ackno (%x) above seqno (%x)\n", pkt->ackno, r->seqno);
+		return;
+	}	
 	// update larno
 	if(pkt->ackno > r->larno)
 	{
+		fprintf(stderr, "Update larno: old: %d new %d\n", r->larno, pkt->ackno);
 		for(int i = r->larno; i < pkt->ackno; i++)
 		{
 			// free all packages that are received
@@ -177,7 +184,6 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 			}
 		}
 		r->larno = pkt->ackno;
-		assert(r->larno <= r->seqno);
 		if(r->larno >= r->seqno)
 		{
 			r->terminate_state |= ALL_PKT_ACK;
@@ -187,12 +193,13 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 			r->s_wait = 0;
 			rel_read(r); // TODO pretty, but it's needed :-( 
 		}
-	}
+	}	
 	if(pkt->len == ACK_LEN)
 	{
 		/* Nothing to do here */
 		return;
 	}
+	fprintf(stderr, "receive: lno: %d, seqno: %d, pkt %x, len: %d \n",r->larno, r->seqno,pkt->seqno, pkt->len);
 	assert(pkt->len >= PKG_MIN_LEN);
 	assert(pkt->len <= PKG_MAX_LEN);
 	pkt->len -= PKG_MIN_LEN;
@@ -237,20 +244,31 @@ void rel_output (rel_t *r)
 		{
 			return;
 		}
+		fprintf(stderr, "Handling pkt %d\n", pkt->seqno);
 		assert(pkt->seqno == r->ackno);
-		assert((r->terminate_state & O_READ_EOF) == 0);
+		//assert((r->terminate_state & O_READ_EOF) == 0); // TODO
+		if((r->terminate_state & O_READ_EOF) != 0)
+		{
+			fprintf(stderr, "ERROR, received something after EOF\n");
+			fprintf(stderr, "receive: lno: %d, seqno: %d, pkt %x, len: %d \n",r->larno, r->seqno,pkt->seqno, pkt->len);
+			print_state(r);
+			assert(pkt->seqno == r->ackno);
+			send_ackpkt(r, r->ackno);
+			return;
+		}
+		
 		if(pkt->len == 0)
 		{ // handle EOF
-			fprintf(stderr, "Received EOF\n");
+			fprintf(stderr, "Received EOF %d\n", pkt->seqno);
+			int res =  conn_output(r->c, pkt->data, 0); // wtf? If I enable it, it fails
 			r->recv_window[r->ackno % r->window_size] = NULL; // TODO pretty
 			r->ackno++;
 			send_ackpkt(r, r->ackno);
-			//int res =  conn_output(r->c, pkt->data, 0); // wtf? If I enable it, it fails
 			r->terminate_state |= O_READ_EOF;
 			r->terminate_state |= WROTE_ALL;
 			return;
 		}
-		assert(pkt->len > r->recv_wrt_bytes);
+		assert((pkt->len > r->recv_wrt_bytes) || (pkt->len == 0));
 		int wrote = conn_output(r->c, pkt->data + r->recv_wrt_bytes,
 				pkt->len - r->recv_wrt_bytes);
 		if(wrote  + r->recv_wrt_bytes == pkt->len)
@@ -275,6 +293,7 @@ void rel_output (rel_t *r)
 
 void send_ackpkt(rel_t *r, uint32_t ackno)
 {
+		fprintf(stderr, "Send ack %d\n", ackno);
 		packet_t *p = (packet_t *)xmalloc(sizeof(packet_t));
 		p->len = htons(ACK_LEN);
 		p->ackno = htonl(ackno);
@@ -287,7 +306,6 @@ void send_ackpkt(rel_t *r, uint32_t ackno)
 
 void send_packet(rel_t *r, packet_t *pkt)
 {
-	fprintf(stderr, "lno: %d, seqno: %d, pkt %d\n",r->larno, r->seqno,pkt->seqno);
 	assert(r->larno <= r->seqno);
 	// checking
 	assert(pkt != NULL);
@@ -309,6 +327,9 @@ void send_packet(rel_t *r, packet_t *pkt)
 		assert(pkt->seqno <= r->seqno);
 		assert(pkt->seqno < r->larno + r->window_size);
 	}
+	fprintf(stderr,
+			"sending: lno: %d, seqno: %d, pkt %d, len %d\n",
+			r->larno, r->seqno, pkt->seqno, pkt->len);
 	// set ackno
 	pkt->ackno = r->ackno;
 	assert(r->larno <= pkt->seqno);
@@ -339,10 +360,11 @@ void send_packet(rel_t *r, packet_t *pkt)
  */
 void rel_read (rel_t *s)
 {
-	if(s->s_wait || s->seqno >= s->larno + s->window_size)
+	if( s->seqno >= s->larno + s->window_size)
 	{
 		fprintf(stderr, 
 				"Our sending window is full!\n");
+		print_state(s);
 		s->s_wait = 1;
 		return;
 	}
@@ -361,8 +383,8 @@ void rel_read (rel_t *s)
 		return;
 	}
 	packet_t *pkt = (packet_t *)xmalloc(sizeof(packet_t));
-
 	int read = conn_input(s->c, pkt->data, MAX_DATA_LEN);
+	assert(((s->terminate_state & M_READ_EOF)  == 0 ) || (read == -1));
 	// -1: EOF / ERROR
 	if(read == -1)
 	{
@@ -389,15 +411,21 @@ void rel_read (rel_t *s)
 
 void handle_retransmission(rel_t *r)
 {
+	if(r->last_retransmitted_pkt < r->larno)
+	{
+		r->last_retransmitted_pkt = r->larno;
+	}
 	while(r->time_stamps[r->last_retransmitted_pkt % r->window_size] 
 			< global_timer - TRANSMISSION_INTERVALL)
 	{
 		fprintf(stderr, "Retransmitting %d, timer: %d \n",
 			   r->last_retransmitted_pkt, global_timer);
-		send_packet(r, r->out_window[r->last_retransmitted_pkt % r->window_size]);
+		packet_t *pkt =  r->out_window[r->last_retransmitted_pkt % r->window_size];
+		send_packet(r, pkt);
+		assert(pkt->seqno == r->last_retransmitted_pkt);
 		assert(r->time_stamps[r->last_retransmitted_pkt % r->window_size] == global_timer);
 		r->last_retransmitted_pkt++;
-		if(r->last_retransmitted_pkt > r->seqno)
+		if(r->last_retransmitted_pkt >= r->seqno)
 		{
 			r->last_retransmitted_pkt = r->larno;
 		}
@@ -409,18 +437,25 @@ void handle_retransmission(rel_t *r)
 
 void check_terminate(rel_t *r)
 {
-	// print_state(r);
+	//print_state(r);
+	rel_read(r);
 	if(r->terminate_state == 0xF)
 	{
 		fprintf(stderr, "Would destroy now\n");
 		conn_output(r->c, NULL, 0); // needed
+		rel_destroy(r);
 	}
 }
 
 void rel_timer ()
 {
 	/* Retransmit any packets that need to be retransmitted */
+	fprintf(stderr, ".");
 	global_timer++;
+	if(global_timer % 5 == 0)
+	{
+		print_state(rel_list);
+	}
 	handle_retransmission(rel_list);
 	check_terminate(rel_list);
 }

@@ -152,7 +152,7 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 	}
 	uint16_t checksum = pkt->cksum;
 	pkt->cksum = 0;
-	if(!cksum(pkt, length) == checksum)
+	if(cksum(pkt, length) != checksum)
 	{
 		fprintf(stderr,
 				"Received package with invalid checksum.\n");	
@@ -220,6 +220,7 @@ void handle_data_packet(rel_t *r, packet_t *pkt)
 		{
 			//free(old); // TODO
 		}
+		// TODO copy memory
 		r->recv_window[pkt->seqno % r->window_size] = pkt;
 		rel_output(r);
 	}
@@ -244,7 +245,7 @@ void rel_output (rel_t *r)
 		{
 			return;
 		}
-		fprintf(stderr, "Handling pkt %d\n", pkt->seqno);
+		fprintf(stderr, "Handling pkt %d, len: %d\n", pkt->seqno, pkt->len);
 		assert(pkt->seqno == r->ackno);
 		//assert((r->terminate_state & O_READ_EOF) == 0); // TODO
 		if((r->terminate_state & O_READ_EOF) != 0)
@@ -255,8 +256,7 @@ void rel_output (rel_t *r)
 			assert(pkt->seqno == r->ackno);
 			send_ackpkt(r, r->ackno);
 			return;
-		}
-		
+		}	
 		if(pkt->len == 0)
 		{ // handle EOF
 			fprintf(stderr, "Received EOF %d\n", pkt->seqno);
@@ -273,6 +273,7 @@ void rel_output (rel_t *r)
 				pkt->len - r->recv_wrt_bytes);
 		if(wrote  + r->recv_wrt_bytes == pkt->len)
 		{ // we wrote all data
+			fprintf(stderr, "Printed everything of packet %d\n", pkt->seqno);
 			r->recv_wrt_bytes = 0;
 			r->recv_window[r->ackno % r->window_size] = NULL; // TODO free
 			r->ackno++;
@@ -364,7 +365,7 @@ void rel_read (rel_t *s)
 	{
 		fprintf(stderr, 
 				"Our sending window is full!\n");
-		print_state(s);
+		//print_state(s);
 		s->s_wait = 1;
 		return;
 	}
@@ -439,6 +440,7 @@ void check_terminate(rel_t *r)
 {
 	//print_state(r);
 	rel_read(r);
+	//rel_output(r);
 	if(r->terminate_state == 0xF)
 	{
 		fprintf(stderr, "Would destroy now\n");

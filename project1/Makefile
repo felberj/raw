@@ -15,7 +15,7 @@ LIBRT = `test -f /usr/lib/x86_64-linux-gnu/librt.a && printf -- -lrt`
 
 CC = gcc
 # CFLAGS = -g -Wall -Werror $(DMALLOC_CFLAGS)
-CFLAGS = -g -Wall -std="c99" $(DMALLOC_CFLAGS)
+CFLAGS = -g -Wall -std="c99" $(DMALLOC_CFLAGS) 
 LIBS = $(DMALLOC_LIBS)
 
 all: reliable

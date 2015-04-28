@@ -15,13 +15,14 @@ LIBRT = `test -f /usr/lib/x86_64-linux-gnu/librt.a && printf -- -lrt`
 
 CC = gcc
 # CFLAGS = -g -Wall -Werror $(DMALLOC_CFLAGS)
-CFLAGS = -g -Wall -std="c99" $(DMALLOC_CFLAGS) 
+OPTIMIZATON = -O3 -DDEBUG
+CFLAGS = -g -Wall -std="c99" $(OPTIMIZATON) $(DMALLOC_CFLAGS) 
 LIBS = $(DMALLOC_LIBS)
 
 all: reliable
 
 rlib.c rlib.o:
-	gcc -Wall -g -Werror -O -c rlib.c
+	gcc -g $(OPTIMIZATON) -c rlib.c
 
 .c.o:
 	$(CC) $(CFLAGS) -c $<
@@ -29,7 +30,7 @@ rlib.c rlib.o:
 rlib.o reliable.o: rlib.h
 
 reliable: reliable.o rlib.o
-	$(CC) $(CFLAGS) -std="c99" -o $@ reliable.o rlib.o $(LIBS) $(LIBRT)
+	$(CC) $(CFLAGS) -o $@ reliable.o rlib.o $(LIBS) $(LIBRT)
 
 .PHONY: tester reference
 tester reference:

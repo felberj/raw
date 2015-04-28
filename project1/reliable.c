@@ -44,7 +44,6 @@ struct reliable_state {
 	uint32_t window_size;
 
 	uint32_t recv_wrt_bytes; /* indicates the number of bytes of the current pkt we already wrote  to our buffer */
-	uint32_t out_wrt_bytes; /* indicates the number of bytes of the current pkt we already wrote to the next packet */
 	char terminate_state; /**/
 
 	char s_wait; /* not zero, if we cant send at the moment */
@@ -95,7 +94,6 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
 	r->seqno = 1;
 	r->larno = 1;
 	r->recv_wrt_bytes = 0;
-	r->out_wrt_bytes = 0;
 	r->window_size = cc->window;
 	r->recv_window = xmalloc(cc->window * sizeof(packet_t *));
 	memset(r->recv_window, 0, cc->window * sizeof(packet_t *));
@@ -218,10 +216,11 @@ void handle_data_packet(rel_t *r, packet_t *pkt)
 		packet_t *old = r->recv_window[pkt->seqno % r->window_size];
 	   	if(old != NULL)
 		{
-			//free(old); // TODO
+			free(old); // TODO
 		}
-		// TODO copy memory
-		r->recv_window[pkt->seqno % r->window_size] = pkt;
+		packet_t *tmp = xmalloc(sizeof(packet_t));
+		memcpy(tmp, pkt, sizeof(packet_t));
+		r->recv_window[pkt->seqno % r->window_size] = tmp;
 		rel_output(r);
 	}
 	else
@@ -247,7 +246,6 @@ void rel_output (rel_t *r)
 		}
 		fprintf(stderr, "Handling pkt %d, len: %d\n", pkt->seqno, pkt->len);
 		assert(pkt->seqno == r->ackno);
-		//assert((r->terminate_state & O_READ_EOF) == 0); // TODO
 		if((r->terminate_state & O_READ_EOF) != 0)
 		{
 			fprintf(stderr, "ERROR, received something after EOF\n");
@@ -260,7 +258,7 @@ void rel_output (rel_t *r)
 		if(pkt->len == 0)
 		{ // handle EOF
 			fprintf(stderr, "Received EOF %d\n", pkt->seqno);
-			int res =  conn_output(r->c, pkt->data, 0); // wtf? If I enable it, it fails
+			conn_output(r->c, pkt->data, 0); // wtf? If I enable it, it fails
 			r->recv_window[r->ackno % r->window_size] = NULL; // TODO pretty
 			r->ackno++;
 			send_ackpkt(r, r->ackno);
@@ -361,51 +359,57 @@ void send_packet(rel_t *r, packet_t *pkt)
  */
 void rel_read (rel_t *s)
 {
-	if( s->seqno >= s->larno + s->window_size)
+	int read = 1;
+	while(read > 0)
 	{
-		fprintf(stderr, 
-				"Our sending window is full!\n");
-		//print_state(s);
-		s->s_wait = 1;
-		return;
-	}
-	packet_t *waiting_pkt = s->out_window[s->larno % s->window_size];
-	if(waiting_pkt != NULL && waiting_pkt->len < MAX_DATA_LEN)
-	{
-		fprintf(stderr, "I did not send a new package, because the waiting one is not full!\n");
-		s->s_wait = 1;
-		return;
-	}
-	packet_t *akt_packet = s->out_window[(s->seqno - 1) % s->window_size];
-	if(akt_packet != NULL && akt_packet->len < MAX_DATA_LEN)
-	{
-		fprintf(stderr, "I did not send a new package, because the current one is not full!\n");
-		s->s_wait = 1;
-		return;
-	}
-	packet_t *pkt = (packet_t *)xmalloc(sizeof(packet_t));
-	int read = conn_input(s->c, pkt->data, MAX_DATA_LEN);
-	assert(((s->terminate_state & M_READ_EOF)  == 0 ) || (read == -1));
-	// -1: EOF / ERROR
-	if(read == -1)
-	{
-		fprintf(stderr,
-				"Error or EOF on reading\n");
-		pkt->len = 0;
-		send_packet(s, pkt);
-		s->terminate_state |= M_READ_EOF;
-	}
-	else if(read == 0)
-	{
-		// :-(
-		fprintf(stderr,
-				"[DEBUG] I was too greedy and had to free the xmallocated packet again :-(\n");
-		free(pkt);
-	}
-	else
-	{
-		pkt->len = read; // TODO send/read moore
-		send_packet(s, pkt);
+		if(s->s_wait || ( s->seqno >= s->larno + s->window_size))
+		{
+			fprintf(stderr, 
+					"Our sending window is full!\n");
+			//print_state(s);
+			s->s_wait = 1;
+			return;
+		}
+		packet_t *waiting_pkt = s->out_window[s->larno % s->window_size];
+		if(waiting_pkt != NULL && waiting_pkt->len < MAX_DATA_LEN)
+		{
+			fprintf(stderr, "I did not send a new package, because the waiting one is not full!\n");
+			s->s_wait = 1;
+			return;
+		}
+		packet_t *akt_packet = s->out_window[(s->seqno - 1) % s->window_size];
+		if(akt_packet != NULL && akt_packet->len < MAX_DATA_LEN)
+		{
+			fprintf(stderr, "I did not send a new package, because the current one is not full!\n");
+			s->s_wait = 1;
+			return;
+		}
+		packet_t *pkt = (packet_t *)xmalloc(sizeof(packet_t));
+		int read = conn_input(s->c, pkt->data, MAX_DATA_LEN);
+		assert(((s->terminate_state & M_READ_EOF)  == 0 ) || (read == -1));
+		// -1: EOF / ERROR
+		if(read == -1)
+		{
+			fprintf(stderr,
+					"Error or EOF on reading\n");
+			pkt->len = 0;
+			send_packet(s, pkt);
+			s->terminate_state |= M_READ_EOF;
+			return;
+		}
+		else if(read == 0)
+		{
+			// :-(
+			fprintf(stderr,
+					"[DEBUG] I was too greedy and had to free the xmallocated packet again :-(\n");
+			free(pkt);
+			return;
+		}
+		else
+		{
+			pkt->len = read; // TODO send/read moore
+			send_packet(s, pkt);
+		}
 	}
 }
 
@@ -439,7 +443,7 @@ void handle_retransmission(rel_t *r)
 void check_terminate(rel_t *r)
 {
 	//print_state(r);
-	rel_read(r);
+	rel_read(r); // TODO needed
 	//rel_output(r);
 	if(r->terminate_state == 0xF)
 	{

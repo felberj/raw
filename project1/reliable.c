@@ -43,6 +43,8 @@ struct reliable_state {
 	packet_t **out_window; /* buffer for outgoing packages */	
 	uint32_t window_size;
 
+	char *in_buffer;
+
 	uint32_t recv_wrt_bytes; /* indicates the number of bytes of the current pkt we already wrote  to our buffer */
 	char terminate_state; /**/
 
@@ -103,6 +105,8 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
 
 	r->terminate_state = 0 | WROTE_ALL | ALL_PKT_ACK;
 	r->s_wait = 0;
+
+	r->in_buffer = xmalloc(MAX_DATA_LEN);
 	
 	r->time_stamps = xmalloc(cc->window * sizeof(uint32_t));
 	memset(r->time_stamps, 0xFF, cc->window * sizeof(uint32_t));
@@ -134,10 +138,10 @@ void rel_destroy (rel_t *r)
  */
 void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 {
-	if(n < ACK_LEN || n > PKG_MAX_LEN)
+	if(n < ACK_LEN)
 	{
 		fprintf(stderr, 
-				"Received too big/small packet %zu\n", n);
+				"Received too small packet %zu\n", n);
 		return;
 	}
 	uint16_t length = ntohs(pkt->len);
@@ -160,12 +164,7 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
 	pkt->len = length;
 	pkt->ackno = ntohl(pkt->ackno);
 	pkt->seqno = ntohl(pkt->seqno);
-	
-	if(pkt->ackno > r->seqno)
-	{
-		fprintf(stderr, "ERROR, received ackno (%x) above seqno (%x)\n", pkt->ackno, r->seqno);
-		return;
-	}	
+	assert(pkt->ackno <= r->seqno);
 	// update larno
 	if(pkt->ackno > r->larno)
 	{
@@ -216,7 +215,7 @@ void handle_data_packet(rel_t *r, packet_t *pkt)
 		packet_t *old = r->recv_window[pkt->seqno % r->window_size];
 	   	if(old != NULL)
 		{
-			free(old); // TODO
+			free(old);
 		}
 		packet_t *tmp = xmalloc(sizeof(packet_t));
 		memcpy(tmp, pkt, sizeof(packet_t));
@@ -326,9 +325,8 @@ void send_packet(rel_t *r, packet_t *pkt)
 		assert(pkt->seqno <= r->seqno);
 		assert(pkt->seqno < r->larno + r->window_size);
 	}
-	fprintf(stderr,
-			"sending: lno: %d, seqno: %d, pkt %d, len %d\n",
-			r->larno, r->seqno, pkt->seqno, pkt->len);
+	fprintf(stderr, "sending: lno: %d, seqno: %d, pkt %d, len %d\n",
+		r->larno, r->seqno, pkt->seqno, pkt->len);
 	// set ackno
 	pkt->ackno = r->ackno;
 	assert(r->larno <= pkt->seqno);
@@ -364,14 +362,12 @@ void rel_read (rel_t *s)
 	{
 		if(s->s_wait || ( s->seqno >= s->larno + s->window_size))
 		{
-			fprintf(stderr, 
-					"Our sending window is full!\n");
-			//print_state(s);
+			//fprintf(stderr, "Our sending window is full!\n");
 			s->s_wait = 1;
 			return;
 		}
 		packet_t *waiting_pkt = s->out_window[s->larno % s->window_size];
-		if(waiting_pkt != NULL && waiting_pkt->len < MAX_DATA_LEN)
+		/*if(waiting_pkt != NULL && waiting_pkt->len < MAX_DATA_LEN)
 		{
 			fprintf(stderr, "I did not send a new package, because the waiting one is not full!\n");
 			s->s_wait = 1;
@@ -383,15 +379,15 @@ void rel_read (rel_t *s)
 			fprintf(stderr, "I did not send a new package, because the current one is not full!\n");
 			s->s_wait = 1;
 			return;
-		}
-		packet_t *pkt = (packet_t *)xmalloc(sizeof(packet_t));
-		int read = conn_input(s->c, pkt->data, MAX_DATA_LEN);
+		}*/
+		int read = conn_input(s->c, s->in_buffer, MAX_DATA_LEN);
 		assert(((s->terminate_state & M_READ_EOF)  == 0 ) || (read == -1));
 		// -1: EOF / ERROR
 		if(read == -1)
 		{
 			fprintf(stderr,
 					"Error or EOF on reading\n");
+			packet_t *pkt = (packet_t *)xmalloc(sizeof(packet_t));
 			pkt->len = 0;
 			send_packet(s, pkt);
 			s->terminate_state |= M_READ_EOF;
@@ -402,12 +398,14 @@ void rel_read (rel_t *s)
 			// :-(
 			fprintf(stderr,
 					"[DEBUG] I was too greedy and had to free the xmallocated packet again :-(\n");
-			free(pkt);
+			//free(pkt); // TODO
 			return;
 		}
 		else
 		{
-			pkt->len = read; // TODO send/read moore
+			packet_t *pkt = (packet_t *)xmalloc(sizeof(packet_t));
+			memcpy(pkt->data, s->in_buffer, read);
+			pkt->len = read;
 			send_packet(s, pkt);
 		}
 	}
@@ -442,9 +440,6 @@ void handle_retransmission(rel_t *r)
 
 void check_terminate(rel_t *r)
 {
-	//print_state(r);
-	rel_read(r); // TODO needed
-	//rel_output(r);
 	if(r->terminate_state == 0xF)
 	{
 		fprintf(stderr, "Would destroy now\n");

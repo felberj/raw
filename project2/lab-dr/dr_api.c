@@ -29,7 +29,8 @@
 
 void print_interface(lvns_interface_t iface);
 void advertise();
-
+void dump_rip_table();
+void print_ip(char*, int);
 /** information about a route which is sent with a RIP packet */
 typedef struct rip_entry_t {
 	uint16_t addr_family;
@@ -63,6 +64,7 @@ typedef struct route_t {
 	struct route_t* next;  /* pointer to the next route in a linked-list */
 } route_t;
 
+void dump_route(route_t* node);
 
 /* internal variables */
 
@@ -190,7 +192,7 @@ void dr_init(unsigned (*func_dr_interface_count)(),
 	for(int i = 0; i < c_interface; i++)
 	{
 		lvns_interface_t iface = dr_get_interface(i);
-		print_interface(iface);
+		print_interface(iface); // TODO networkorder of ip and mask
 		route_t* route = (route_t *)malloc(sizeof(route_t));
 		route->subnet = iface.ip & iface.subnet_mask;
 		route->mask = iface.subnet_mask;
@@ -198,16 +200,20 @@ void dr_init(unsigned (*func_dr_interface_count)(),
 		route->outgoing_intf = i;
 		route->cost = iface.cost;
 		route->old_interface_cost = iface.cost;
-		gettimeofday(&route->last_updated, NULL);
+		/* gettimeofday(&route->last_updated, NULL); */
+		(&route->last_updated)->tv_sec = 0xFFFFFFFF; // To prevent from beeing deleted
 		route->is_garbage = 0;
 		route->next = route_list;
 		route_list = route;
+		fprintf(stderr, "Added (interface) route: \n");
+		dump_route(route);
 	}
 
 	advertise();
 }
 
 next_hop_t safe_dr_get_next_hop(uint32_t ip) {
+	print_ip("Next hop called", ip);
 	next_hop_t hop;
 
 	hop.interface = 0;
@@ -224,9 +230,9 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 		{
 			if( (ip & node->mask) == (node->subnet & node->mask))
 			{
-				if(node->mask > longest_mask)
+				if(ntohl(node->mask) > longest_mask)
 				{
-					longest_mask = node->mask;
+					ntohl(longest_mask = node->mask);
 					hop.interface = node->outgoing_intf;
 					hop.dst_ip = node->next_hop_ip;
 				}
@@ -235,6 +241,15 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 		node = node->next;
 	}
 	// TODO check if found
+	dump_rip_table();
+	if(longest_mask == 0)
+	{
+		fprintf(stderr, "ERROR: no route found :-(\n");
+	}
+	else
+	{
+		fprintf(stderr, "DEBUG: found route <3\n");
+	}
 	return hop;
 }
 
@@ -262,28 +277,33 @@ void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 		fprintf(stderr, "DEBUG: Unicast -> drop\n");
 		return;
 	}
+	fprintf(stderr, "INFO: Handle packet\n");
 	int changed = 0;
 	lvns_interface_t iface = dr_get_interface(intf);
 	assert((len - sizeof(rip_header_t)) % sizeof(rip_entry_t) == 0);
 	uint32_t entries_length = (len - sizeof(rip_header_t)) / sizeof(rip_entry_t);
-	rip_entry_t *entries = (rip_entry_t *)&header->entries;
 	for(uint32_t i = 0; i < entries_length; i++)
 	{
-		rip_entry_t entry = entries[i];
+		rip_entry_t entry = header->entries[i];
 		entry.metric += iface.cost; 
 		route_t* node = route_list;
 		while(node != NULL)
 		{
 			if((node->subnet == entry.ip) && (node->mask == entry.subnet_mask))
 			{
+				gettimeofday(&node->last_updated, NULL);
 				if((node->cost > entry.metric) || node->is_garbage)
 				{ // found a better route
+				  // TODO handle infinity
 					node->cost = entry.metric;
 					node->outgoing_intf = intf;
+					node->next_hop_ip = ip;
 					node->cost = entry.metric;
 					node->old_interface_cost = iface.cost;
 					gettimeofday(&node->last_updated, NULL);
 					node->is_garbage = 0;
+					fprintf(stderr, "Updated route: \n");
+					dump_route(node);
 					changed = 1;
 				}
 				break; // we handled the entry
@@ -293,17 +313,22 @@ void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 		if(node == NULL)
 		{ // we did not find it, so we insert it
 			// TODO Falsch?!
+			// TODO handle infinity
 			route_t* route = (route_t *)malloc(sizeof(route_t));
-			route->subnet = entry.ip & entry.subnet_mask;
+			route->subnet = entry.ip;
+			assert(route->subnet != 0);
 			route->mask = entry.subnet_mask;
 			route->next_hop_ip = entry.next_hop; // TODO correcnt?
 			route->outgoing_intf = i;
+			route->next_hop_ip = ip;
 			route->cost = entry.metric;
 			route->old_interface_cost = iface.cost;
 			gettimeofday(&route->last_updated, NULL);
 			route->is_garbage = 0;
 			route->next = route_list;
 			route_list = route;
+			fprintf(stderr, "Inserted route: \n");
+			dump_route(route);
 			changed = 1;
 		}
 	}
@@ -323,6 +348,7 @@ static void safe_dr_interface_changed(unsigned intf,
 		int state_changed,
 		int cost_changed) {
 	/* handle an interface going down or being brought up */
+	fprintf(stderr, "Interface changed: Interface: %d state: %d cost: %d\n", intf, state_changed, cost_changed);
 	int changed = 0;
 	route_t *route_node = route_list;
 	lvns_interface_t iface = dr_get_interface(intf);	
@@ -354,6 +380,7 @@ static void safe_dr_interface_changed(unsigned intf,
 
 void print_ip(char* label, int ip)
 {
+	ip = ntohl(ip);
 	unsigned char bytes[4];
 	bytes[0] = ip & 0xFF;
 	bytes[1] = (ip >> 8) & 0xFF;
@@ -364,14 +391,37 @@ void print_ip(char* label, int ip)
 
 void print_interface(lvns_interface_t iface){
 	fprintf(stderr, "*** Interface ***\n");
-	print_ip("IP", ntohl(iface.ip));
-	print_ip("subnetmask", ntohl(iface.subnet_mask));
+	print_ip("IP", iface.ip);
+	print_ip("subnetmask", iface.subnet_mask);
 	fprintf(stderr, "Enabled: %d\nCost: %d\n", iface.enabled, iface.cost);
+}
+
+void dump_route(route_t* node)
+{
+		fprintf(stderr, "*ROUTE*\n");
+		print_ip("subnet", (node->subnet));
+		print_ip("mask", (node->mask));
+		print_ip("next_hop_ip", (node->next_hop_ip));
+		fprintf(stderr, "outgoing intf: %d\n", node->outgoing_intf);
+		fprintf(stderr, "cost: %d\n", node->cost);
+		fprintf(stderr, "is_garbage: %d\n", node->is_garbage);
+}
+
+void dump_rip_table()
+{
+	fprintf(stderr, "***START TABLE DMP***\n");
+	route_t* node = route_list;
+	while(node != NULL)
+	{
+		dump_route(node);
+		node = node->next;
+	}
 }
 
 void advertise()
 {
 	fprintf(stderr, "Start advertising\n");
+	//dump_rip_table();
 	uint32_t routes_length = 0;
 	route_t *route_node = route_list;
 	route_t *prev_node = NULL;
@@ -384,6 +434,7 @@ void advertise()
 		{
 			route_node->is_garbage = 1;
 			fprintf(stderr, "DEBUG: Route is now garbage\n");
+			dump_route(route_node);
 		}
 		if(route_node->is_garbage)
 		{ // remove garbage
@@ -396,13 +447,14 @@ void advertise()
 				prev_node->next = route_node->next;
 			}
 			free(route_node);
+			route_node = prev_node->next;
 		}
 		else
 		{
 			routes_length++;
+			prev_node = route_node;
+			route_node = route_node->next;
 		}
-		prev_node = route_node;
-		route_node = route_node->next;
 	}
 	uint32_t buffer_size = sizeof(rip_header_t) + routes_length * sizeof(rip_entry_t);
 	rip_header_t *rip_payload = (rip_header_t *)malloc(buffer_size);
@@ -422,18 +474,19 @@ void advertise()
 			assert(i <= routes_length);
 			if(!route_node->is_garbage)
 			{
-				rip_entry_t entry = rip_payload->entries[i];	
-				entry.addr_family = htons(AF_INET);
-				entry.pad = 0;
-				entry.ip = route_node->subnet;
-				entry.subnet_mask = route_node->mask;
-				entry.next_hop = route_node->next_hop_ip;
+				rip_entry_t *entry = &rip_payload->entries[i];	
+				entry->addr_family = htons(AF_INET);
+				entry->pad = 0;
+				entry->ip = route_node->subnet;
+				assert(entry->ip != 0);
+				entry->subnet_mask = route_node->mask;
+				entry->next_hop = route_node->next_hop_ip;
 				if(j == route_node->outgoing_intf){
-					entry.metric = INFINITY; // Split Horizon with Poisoned Reverse
+					entry->metric = INFINITY; // Split Horizon with Poisoned Reverse
 				}
 				else
 				{
-					entry.metric = route_node->cost;
+					entry->metric = route_node->cost;
 				}
 				i++;
 			}

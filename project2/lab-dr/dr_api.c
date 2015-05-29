@@ -214,7 +214,7 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 			{
 				if(ntohl(node->mask) > longest_mask)
 				{
-					ntohl(longest_mask = node->mask);
+					longest_mask = ntohl(node->mask);
 					hop.interface = node->outgoing_intf;
 					hop.dst_ip = node->next_hop_ip;
 				}
@@ -244,9 +244,23 @@ int handle_rip_entry(uint32_t ip, int intf, lvns_interface_t* iface, rip_entry_t
 	{
 		if((node->subnet == entry->ip) && (node->mask == entry->subnet_mask))
 		{
-			gettimeofday(&node->last_updated, NULL);
+			if (node->cost == entry->metric)
+			{
+				gettimeofday(&node->last_updated, NULL);
+			}
+			if((intf == node->outgoing_intf) && (entry->metric >= INFINITY))
+			{ // if route gets invalid, we store it
+				/*if( node->cost != entry->metric)
+				{
+					dump_route(node);
+					fprintf(stderr, "DEBUG: got dead route: New cost should be %d\n", entry->metric);
+					//node->cost = entry->metric;
+					//changed = 1;
+				}*/
+			}
 			if((node->cost > entry->metric) || node->is_garbage)
 			{ // found a better route
+				gettimeofday(&node->last_updated, NULL);
 				node->outgoing_intf = intf;
 				node->next_hop_ip = ip;
 				node->cost = entry->metric;
@@ -435,7 +449,7 @@ void advertise()
 	gettimeofday(&current_time, NULL);
 	
 	while(route_node != NULL)
-	{
+	{	
 		if(route_node->last_updated.tv_sec  + RIP_GARBAGE_SEC <= current_time.tv_sec)
 		{
 			route_node->is_garbage = 1;

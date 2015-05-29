@@ -31,6 +31,8 @@ void print_interface(lvns_interface_t iface);
 void advertise();
 void dump_rip_table();
 void print_ip(char*, int);
+void check_interfaces_routes();
+
 /** information about a route which is sent with a RIP packet */
 typedef struct rip_entry_t {
 	uint16_t addr_family;
@@ -188,33 +190,12 @@ void dr_init(unsigned (*func_dr_interface_count)(),
 
 	/* do initialization of your own data structures here */
 
-	int c_interface = dr_interface_count();
-	for(int i = 0; i < c_interface; i++)
-	{ // TODO make make an insert route function
-		// TODO check interfaces
-		lvns_interface_t iface = dr_get_interface(i);
-		print_interface(iface); 
-		route_t* route = (route_t *)malloc(sizeof(route_t));
-		route->subnet = iface.ip & iface.subnet_mask;
-		route->mask = iface.subnet_mask;
-		route->next_hop_ip = 0;
-		route->outgoing_intf = i;
-		route->cost = iface.cost;
-		route->old_interface_cost = iface.cost;
-		/* gettimeofday(&route->last_updated, NULL); */
-		(&route->last_updated)->tv_sec = 0xFFFFFFFF; // To prevent from beeing deleted
-		route->is_garbage = 0;
-		route->next = route_list;
-		route_list = route;
-		fprintf(stderr, "Added (interface) route: \n");
-		dump_route(route);
-	}
-
+	check_interfaces_routes();
 	advertise();
 }
 
 next_hop_t safe_dr_get_next_hop(uint32_t ip) {
-	print_ip("Next hop called", ip);
+	print_ip("DEBUG: Next hop called", ip);
 	next_hop_t hop;
 
 	hop.interface = 0;
@@ -241,12 +222,11 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 		}
 		node = node->next;
 	}
-	// TODO check if found
 	if(longest_mask == 0)
 	{
 		dump_rip_table();
 		hop.dst_ip = 0xFFFFFFFF;
-		fprintf(stderr, "ERROR: no route found :-(\n");
+		fprintf(stderr, "DEBUG: no route found :-(\n");
 	}
 	else
 	{
@@ -255,6 +235,53 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 	return hop;
 }
 
+int handle_rip_entry(uint32_t ip, int intf, lvns_interface_t* iface, rip_entry_t* entry)
+{
+	int changed = 0;
+	entry->metric += iface->cost; 
+	route_t* node = route_list;
+	while(node != NULL)
+	{
+		if((node->subnet == entry->ip) && (node->mask == entry->subnet_mask))
+		{
+			gettimeofday(&node->last_updated, NULL);
+			if((node->cost > entry->metric) || node->is_garbage)
+			{ // found a better route
+				node->outgoing_intf = intf;
+				node->next_hop_ip = ip;
+				node->cost = entry->metric;
+				node->old_interface_cost = iface->cost;
+				node->is_garbage = 0;
+				fprintf(stderr, "DEBUG: Updated route: \n");
+				dump_route(node);
+				changed = 1;
+			}
+			break; // we handled the entry
+		}
+		node = node->next;
+	}
+	if(node == NULL && entry->metric < INFINITY)
+	{ // we did not find it, so we insert it
+		route_t* route = (route_t *)malloc(sizeof(route_t));
+		route->subnet = entry->ip;
+		assert(route->subnet != 0);
+		route->mask = entry->subnet_mask;
+		route->next_hop_ip = entry->next_hop;
+		route->outgoing_intf = intf;
+		route->next_hop_ip = ip;
+		route->cost = entry->metric;
+		route->old_interface_cost = iface->cost;
+		gettimeofday(&route->last_updated, NULL);
+		route->is_garbage = 0;
+		route->next = route_list;
+		route_list = route;
+		fprintf(stderr, "DEBUG: Inserted route: \n");
+		dump_route(route);
+		changed = 1;
+	}
+
+	return changed;
+}
 void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 		char* buf /* borrowed */, unsigned len) {
 	/* handle the dynamic routing payload in the buf buffer */
@@ -281,55 +308,14 @@ void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 	}
 	fprintf(stderr, "INFO: Handle packet\n");
 	int changed = 0;
-	lvns_interface_t iface = dr_get_interface(intf);
 	assert((len - sizeof(rip_header_t)) % sizeof(rip_entry_t) == 0);
 	uint32_t entries_length = (len - sizeof(rip_header_t)) / sizeof(rip_entry_t);
+	lvns_interface_t iface = dr_get_interface(intf);
 	for(uint32_t i = 0; i < entries_length; i++)
 	{
 		rip_entry_t entry = header->entries[i];
-		entry.metric += iface.cost; 
-		route_t* node = route_list;
-		while(node != NULL)
-		{
-			if((node->subnet == entry.ip) && (node->mask == entry.subnet_mask))
-			{
-				gettimeofday(&node->last_updated, NULL);
-				if((node->cost > entry.metric) || node->is_garbage)
-				{ // found a better route
-					node->cost = entry.metric;
-					node->outgoing_intf = intf;
-					node->next_hop_ip = ip;
-					node->cost = entry.metric;
-					node->old_interface_cost = iface.cost;
-					gettimeofday(&node->last_updated, NULL);
-					node->is_garbage = 0;
-					fprintf(stderr, "Updated route: \n");
-					dump_route(node);
-					changed = 1;
-				}
-				break; // we handled the entry
-			}
-			node = node->next;
-		}
-		if(node == NULL && entry.metric < INFINITY)
-		{ // we did not find it, so we insert it
-			route_t* route = (route_t *)malloc(sizeof(route_t));
-			route->subnet = entry.ip;
-			assert(route->subnet != 0);
-			route->mask = entry.subnet_mask;
-			route->next_hop_ip = entry.next_hop; // TODO correcnt?
-			route->outgoing_intf = i;
-			route->next_hop_ip = ip;
-			route->cost = entry.metric;
-			route->old_interface_cost = iface.cost;
-			gettimeofday(&route->last_updated, NULL);
-			route->is_garbage = 0;
-			route->next = route_list;
-			route_list = route;
-			fprintf(stderr, "Inserted route: \n");
-			dump_route(route);
-			changed = 1;
-		}
+		int res = handle_rip_entry(ip, intf, &iface, &entry);
+		changed = res | changed;
 	}
 
 	if(changed)
@@ -338,8 +324,30 @@ void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 	}
 }
 
+void check_interfaces_routes()
+{
+	rip_entry_t entry;
+	int c_interface = dr_interface_count();
+	for(int i = 0; i < c_interface; i++)
+	{ 
+		lvns_interface_t iface = dr_get_interface(i);
+		entry.ip = iface.ip & iface.subnet_mask;
+		entry.subnet_mask = iface.subnet_mask;
+		entry.metric = 0;
+		entry.next_hop = 0;
+		int ip = 0;
+		int res = handle_rip_entry(ip, i, &iface, &entry);
+		if(res)
+		{
+			fprintf(stderr, "Added (interface) route: \n");
+		}
+	}
+}
+
+
 void safe_dr_handle_periodic() {
 	/* handle periodic tasks for dynamic routing here */
+	check_interfaces_routes();
 	advertise();
 }
 
@@ -397,13 +405,13 @@ void print_interface(lvns_interface_t iface){
 
 void dump_route(route_t* node)
 {
-		fprintf(stderr, "*ROUTE*\n");
-		print_ip("subnet", (node->subnet));
-		print_ip("mask", (node->mask));
-		print_ip("next_hop_ip", (node->next_hop_ip));
-		fprintf(stderr, "outgoing intf: %d\n", node->outgoing_intf);
-		fprintf(stderr, "cost: %d\n", node->cost);
-		fprintf(stderr, "is_garbage: %d\n", node->is_garbage);
+	fprintf(stderr, "*ROUTE*\n");
+	print_ip("subnet", (node->subnet));
+	print_ip("mask", (node->mask));
+	print_ip("next_hop_ip", (node->next_hop_ip));
+	fprintf(stderr, "outgoing intf: %d\n", node->outgoing_intf);
+	fprintf(stderr, "cost: %d\n", node->cost);
+	fprintf(stderr, "is_garbage: %d\n", node->is_garbage);
 }
 
 void dump_rip_table()

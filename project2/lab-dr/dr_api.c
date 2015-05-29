@@ -190,9 +190,10 @@ void dr_init(unsigned (*func_dr_interface_count)(),
 
 	int c_interface = dr_interface_count();
 	for(int i = 0; i < c_interface; i++)
-	{
+	{ // TODO make make an insert route function
+		// TODO check interfaces
 		lvns_interface_t iface = dr_get_interface(i);
-		print_interface(iface); // TODO networkorder of ip and mask
+		print_interface(iface); 
 		route_t* route = (route_t *)malloc(sizeof(route_t));
 		route->subnet = iface.ip & iface.subnet_mask;
 		route->mask = iface.subnet_mask;
@@ -226,7 +227,7 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 
 	while(node != NULL)
 	{
-		if(!node->is_garbage)
+		if(!node->is_garbage && node->cost != INFINITY)
 		{
 			if( (ip & node->mask) == (node->subnet & node->mask))
 			{
@@ -241,9 +242,10 @@ next_hop_t safe_dr_get_next_hop(uint32_t ip) {
 		node = node->next;
 	}
 	// TODO check if found
-	dump_rip_table();
 	if(longest_mask == 0)
 	{
+		dump_rip_table();
+		hop.dst_ip = 0xFFFFFFFF;
 		fprintf(stderr, "ERROR: no route found :-(\n");
 	}
 	else
@@ -294,7 +296,6 @@ void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 				gettimeofday(&node->last_updated, NULL);
 				if((node->cost > entry.metric) || node->is_garbage)
 				{ // found a better route
-				  // TODO handle infinity
 					node->cost = entry.metric;
 					node->outgoing_intf = intf;
 					node->next_hop_ip = ip;
@@ -310,10 +311,8 @@ void safe_dr_handle_packet(uint32_t ip, unsigned intf,
 			}
 			node = node->next;
 		}
-		if(node == NULL)
+		if(node == NULL && entry.metric < INFINITY)
 		{ // we did not find it, so we insert it
-			// TODO Falsch?!
-			// TODO handle infinity
 			route_t* route = (route_t *)malloc(sizeof(route_t));
 			route->subnet = entry.ip;
 			assert(route->subnet != 0);
@@ -421,7 +420,6 @@ void dump_rip_table()
 void advertise()
 {
 	fprintf(stderr, "Start advertising\n");
-	//dump_rip_table();
 	uint32_t routes_length = 0;
 	route_t *route_node = route_list;
 	route_t *prev_node = NULL;
@@ -496,4 +494,5 @@ void advertise()
 		dr_send_payload(RIP_IP, RIP_IP, j, (char *)rip_payload, buffer_size);
 	}
 	free(rip_payload);
+	dump_rip_table();
 }

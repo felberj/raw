@@ -239,6 +239,10 @@ int handle_rip_entry(uint32_t ip, int intf, lvns_interface_t* iface, rip_entry_t
 {
 	int changed = 0;
 	entry->metric += iface->cost; 
+	if(entry->metric > INFINITY)
+	{
+		entry->metric = INFINITY;
+	}
 	route_t* node = route_list;
 	while(node != NULL)
 	{
@@ -248,15 +252,12 @@ int handle_rip_entry(uint32_t ip, int intf, lvns_interface_t* iface, rip_entry_t
 			{
 				gettimeofday(&node->last_updated, NULL);
 			}
-			if((intf == node->outgoing_intf) && (entry->metric >= INFINITY))
+			if((node->next_hop_ip == ip) && (entry->metric != node->cost))
 			{ // if route gets invalid, we store it
-				/*if( node->cost != entry->metric)
-				{
-					dump_route(node);
-					fprintf(stderr, "DEBUG: got dead route: New cost should be %d\n", entry->metric);
-					//node->cost = entry->metric;
-					//changed = 1;
-				}*/
+				dump_route(node);
+				fprintf(stderr, "DEBUG: got changed route: New cost should be %d\n", entry->metric);
+				node->cost = entry->metric;
+				changed = 1;
 			}
 			if((node->cost > entry->metric) || node->is_garbage)
 			{ // found a better route
@@ -383,9 +384,13 @@ static void safe_dr_interface_changed(unsigned intf,
 			}
 			if(cost_changed)
 			{
+				fprintf(stderr, "Change cost: Current: %d New %d, old iface %d new iface %d\n",route_node->cost, route_node->cost - route_node->old_interface_cost + iface.cost, route_node->old_interface_cost, iface.cost);
 				route_node->cost = route_node->cost - route_node->old_interface_cost + iface.cost;
-				assert(route_node->cost < INFINITY);
 				route_node->old_interface_cost = iface.cost;
+				if(route_node->cost > INFINITY)
+				{
+					route_node->cost = INFINITY;
+				}
 			}
 			changed = 1;
 		}
@@ -516,5 +521,5 @@ void advertise()
 		dr_send_payload(RIP_IP, RIP_IP, j, (char *)rip_payload, buffer_size);
 	}
 	free(rip_payload);
-	dump_rip_table();
+	//dump_rip_table();
 }
